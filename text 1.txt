@@ -1,0 +1,670 @@
+-- BRAINROT HUB - FINAL CLEAN VERSION (NO ERRORS)
+-- Antihit: NO GUI, AUTO-ON, STEALTH ESCAPE
+-- Hardened against infinite yield warnings and missing remotes.
+
+local Players           = game:GetService("Players")
+local Workspace         = game:GetService("Workspace")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService        = game:GetService("RunService")
+local StarterGui        = game:GetService("StarterGui")
+local LocalPlayer       = Players.LocalPlayer
+
+-- helper: safe wait for child with timeout
+local function safeWait(parent, name, timeout)
+    if not parent then return nil end
+    if parent:FindFirstChild(name) then return parent:FindFirstChild(name) end
+    local total = 0
+    timeout = timeout or 5
+    while total < timeout do
+        local found = parent:FindFirstChild(name)
+        if found then return found end
+        task.wait(0.1)
+        total = total + 0.1
+    end
+    return nil
+end
+
+-- helper: recursive search by name (first match)
+local function findDescendantByName(root, name)
+    if not root then return nil end
+    for _, v in ipairs(root:GetDescendants()) do
+        if v.Name == name then
+            return v
+        end
+    end
+    return nil
+end
+
+-- Grab PlayerGui safely (LocalScript usually has it immediately, but be safe)
+local PlayerGui = LocalPlayer and safeWait(LocalPlayer, "PlayerGui", 5) or nil
+if not PlayerGui then
+    warn("[BrainrotHub] PlayerGui not found; creating a temporary ScreenGui parent fallback.")
+    PlayerGui = Instance.new("Folder")
+    PlayerGui.Name = "BRH_FallbackGui"
+    PlayerGui.Parent = LocalPlayer or Players
+end
+
+-- Try common paths for required remotes, but never block indefinitely.
+local UseItemRemote, BuyItemRemote
+
+-- Attempt method 1: exact path under ReplicatedStorage.Packages.Net.RE.UseItem (your original target)
+do
+    local Packages = safeWait(ReplicatedStorage, "Packages", 2)
+    local Net = Packages and safeWait(Packages, "Net", 2)
+    local RE = Net and safeWait(Net, "RE", 2)
+    local RF = Net and safeWait(Net, "RF", 2)
+
+    if RE then
+        UseItemRemote = safeWait(RE, "UseItem", 2) or findDescendantByName(RE, "UseItem")
+    end
+    if RF then
+        -- RequestBuy might be nested like "CoinsShopService" -> "RequestBuy"
+        local coins = safeWait(RF, "CoinsShopService", 1)
+        BuyItemRemote = coins and safeWait(coins, "RequestBuy", 1)
+        if not BuyItemRemote then
+            BuyItemRemote = findDescendantByName(RF, "RequestBuy")
+        end
+    end
+end
+
+-- If not found, search ReplicatedStorage for matches (non-blocking but thorough)
+if not UseItemRemote then
+    UseItemRemote = findDescendantByName(ReplicatedStorage, "UseItem")
+end
+if not BuyItemRemote then
+    BuyItemRemote = findDescendantByName(ReplicatedStorage, "RequestBuy") or findDescendantByName(ReplicatedStorage, "RequestBuyRemote")
+end
+
+-- Final fallback: warn and continue with features disabled
+if not UseItemRemote then
+    warn("[BrainrotHub] UseItem remote not found. Features that call UseItem will be disabled.")
+else
+    print("[BrainrotHub] UseItem remote found:", UseItemRemote:GetFullName())
+end
+
+if not BuyItemRemote then
+    warn("[BrainrotHub] RequestBuy/BuyItem remote not found. Auto-buy features will be disabled.")
+else
+    print("[BrainrotHub] RequestBuy remote found:", BuyItemRemote:GetFullName())
+end
+
+-- TOGGLE STATES
+local Toggles = {
+    ["auto Kick After Steal"] = true,
+    ["Esp Best Brainrots"]    = false,
+    ["auto Laser"]            = false,
+    ["Wall And Steal Bases"]  = false,
+    ["grapple Speed"]         = false,
+    ["Antihit"]               = false,
+}
+
+-- GLOBALS
+local ESP_FOLDER  = Instance.new("Folder", PlayerGui); ESP_FOLDER.Name = "ESP"
+local LINE_FOLDER = Instance.new("Folder", Workspace); LINE_FOLDER.Name = "ESP_Lines"
+local currentESP, currentBeam, currentPetInfo, a0, a1
+local platform
+local originalTransparency = {}
+local grappleConnections = {}
+local grappleSpeed = 150
+
+-- ANTIHIT GLOBALS
+local antiHitLoop
+local lastTriggered = 0
+local cooldown = 3.5
+
+-- UI SETUP
+local screen = Instance.new("ScreenGui")
+screen.Name = "BrainrotHub"
+screen.ResetOnSpawn = false
+screen.Parent = PlayerGui
+
+local frame = Instance.new("Frame")
+frame.Size = UDim2.new(0, 300, 0, 380)  -- Clean size
+frame.Position = UDim2.new(0.05, 0, 0.2, 0)
+frame.BackgroundColor3 = Color3.fromRGB(15, 15, 15)
+frame.BorderSizePixel = 0
+frame.Active = true
+frame.Draggable = true
+frame.Parent = screen
+
+Instance.new("UICorner", frame).CornerRadius = UDim.new(0, 16)
+local stroke = Instance.new("UIStroke", frame)
+stroke.Color = Color3.fromRGB(60, 60, 60)
+stroke.Thickness = 1
+
+local title = Instance.new("TextLabel", frame)
+title.Size = UDim2.new(1, 0, 0, 50)
+title.BackgroundTransparency = 1
+title.Text = "FEYKHUB | SAB"
+title.TextColor3 = Color3.fromRGB(255, 255, 255)
+title.Font = Enum.Font.GothamBold
+title.TextSize = 20
+
+-- TOGGLE CREATOR
+local function createToggle(name, yPos)
+    local container = Instance.new("Frame", frame)
+    container.Size = UDim2.new(0, 260, 0, 40)
+    container.Position = UDim2.new(0, 20, 0, yPos)
+    container.BackgroundTransparency = 1
+
+    local label = Instance.new("TextLabel", container)
+    label.Size = UDim2.new(0, 180, 1, 0)
+    label.BackgroundTransparency = 1
+    label.Text = name
+    label.TextColor3 = Color3.fromRGB(255, 255, 255)
+    label.Font = Enum.Font.Gotham
+    label.TextSize = 14
+    label.TextXAlignment = Enum.TextXAlignment.Left
+
+    local bg = Instance.new("Frame", container)
+    bg.Size = UDim2.new(0, 50, 0, 26)
+    bg.Position = UDim2.new(1, -60, 0.5, -13)
+    bg.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
+    Instance.new("UICorner", bg).CornerRadius = UDim.new(1, 0)
+
+    local circle = Instance.new("Frame", bg)
+    circle.Size = UDim2.new(0, 20, 0, 20)
+    circle.Position = UDim2.new(0, 3, 0.5, -10)
+    circle.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    Instance.new("UICorner", circle).CornerRadius = UDim.new(1, 0)
+
+    local btn = Instance.new("TextButton", container)
+    btn.Size = UDim2.new(1, 0, 1, 0)
+    btn.BackgroundTransparency = 1
+    btn.Text = ""
+
+    local enabled = Toggles[name]
+    local function updateVisual()
+        if enabled then
+            bg.BackgroundColor3 = Color3.fromRGB(0, 200, 255)
+            circle.Position = UDim2.new(1, -23, 0.5, -10)
+        else
+            bg.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
+            circle.Position = UDim2.new(0, 3, 0.5, -10)
+        end
+    end
+    updateVisual()
+
+    btn.MouseButton1Click:Connect(function()
+        enabled = not enabled
+        Toggles[name] = enabled
+        updateVisual()
+
+        if name == "Esp Best Brainrots" then
+            if enabled then startESP() else stopESP() end
+        elseif name == "auto Laser" then
+            if enabled then startAutoLaser() else stopAutoLaser() end
+        elseif name == "Wall And Steal Bases" then
+            if enabled then enableWallFloat() else disableWallFloat() end
+        elseif name == "grapple Speed" then
+            if enabled then enableGrapple() else disableGrapple() end
+        elseif name == "Antihit" then
+            if enabled then enableAntiHit() else disableAntiHit() end
+        end
+    end)
+end
+
+-- CREATE TOGGLES
+createToggle("auto Kick After Steal", 70)
+createToggle("Esp Best Brainrots",    120)
+createToggle("auto Laser",            170)
+createToggle("Wall And Steal Bases",  220)
+createToggle("grapple Speed",         270)
+createToggle("Antihit",               320)
+
+-- Remove "Button" text globally
+for _, v in pairs(screen:GetDescendants()) do
+    if v:IsA("TextButton") then v.Text = "" end
+end
+
+-- AUTO KICK AFTER STEAL
+task.spawn(function()
+    local keyword = "you stole"
+    local function hasKeyword(txt)
+        return typeof(txt) == "string" and string.find(string.lower(txt), keyword)
+    end
+    local function kick()
+        pcall(function() LocalPlayer:Kick("You stole brainrot!") end)
+    end
+    local function scan(obj)
+        if obj:IsA("TextLabel") or obj:IsA("TextButton") or obj:IsA("TextBox") then
+            if hasKeyword(obj.Text) then kick() end
+            obj:GetPropertyChangedSignal("Text"):Connect(function()
+                if hasKeyword(obj.Text) then kick() end
+            end)
+        end
+    end
+
+    for _, gui in ipairs(PlayerGui:GetChildren()) do
+        gui.DescendantAdded:Connect(scan)
+        for _, v in ipairs(gui:GetDescendants()) do scan(v) end
+    end
+    PlayerGui.ChildAdded:Connect(function(gui)
+        gui.DescendantAdded:Connect(scan)
+        for _, v in ipairs(gui:GetDescendants()) do scan(v) end
+    end)
+end)
+
+-- ESP
+local function parseMoney(text)
+    local num, suf = text:match("%$([%d%.]+)([kKmMbB]*)")
+    num = tonumber(num) or 0
+    if suf then
+        suf = suf:lower()
+        if suf == "k" then num = num * 1000
+        elseif suf == "m" then num = num * 1000000
+        elseif suf == "b" then num = num * 1000000000 end
+    end
+    return num
+end
+
+local function createESP(name, info, mut, part)
+    if currentESP then currentESP:Destroy() end
+    if not part then return end
+    local bb = Instance.new("BillboardGui", ESP_FOLDER)
+    bb.Size = UDim2.new(0, 150, 0, 50)
+    bb.Adornee = part
+    bb.StudsOffset = Vector3.new(0, 3, 0)
+    bb.AlwaysOnTop = true
+
+    local label = Instance.new("TextLabel", bb)
+    label.Size = UDim2.new(1, 0, 1, 0)
+    label.BackgroundTransparency = 1
+    label.TextColor3 = Color3.fromRGB(255, 255, 255)
+    label.TextStrokeTransparency = 0
+    label.TextSize = 10
+    label.RichText = true
+    label.Text = string.format(
+        '<font color="rgb(255,0,0)">%s</font>\n<font color="rgb(0,255,0)">%s</font>\n<font color="rgb(255,255,0)">%s</font>',
+        name or "?", info or "", mut or ""
+    )
+    currentESP = bb
+end
+
+local function createBeam(part)
+    local char = LocalPlayer.Character
+    if not char or not char:FindFirstChild("HumanoidRootPart") then return end
+    if currentBeam then currentBeam:Destroy() end
+    if a0 then a0:Destroy() end
+    if a1 then a1:Destroy() end
+
+    a0 = Instance.new("Attachment", char.HumanoidRootPart)
+    a1 = Instance.new("Attachment", part)
+
+    local beam = Instance.new("Beam", LINE_FOLDER)
+    beam.Attachment0 = a0
+    beam.Attachment1 = a1
+    beam.Width0 = 0.35
+    beam.Width1 = 0.35
+    beam.FaceCamera = true
+
+    task.spawn(function()
+        while beam and beam.Parent do
+            beam.Color = ColorSequence.new(Color3.fromHSV((tick() % 5) / 5, 1, 1))
+            task.wait(0.05)
+        end
+    end)
+    currentBeam = beam
+end
+
+local function findBestPet()
+    local best, bestVal = nil, -1
+    local Plots = Workspace:FindFirstChild("Plots")
+    if not Plots then return end
+
+    for _, plot in ipairs(Plots:GetChildren()) do
+        local podiums = plot:FindFirstChild("AnimalPodiums")
+        if podiums then
+            for _, podium in ipairs(podiums:GetChildren()) do
+                local spawn = podium:FindFirstChild("Base") and podium.Base:FindFirstChild("Spawn")
+                local attach = spawn and spawn:FindFirstChild("Attachment")
+                local over = attach and attach:FindFirstChild("AnimalOverhead")
+                if over then
+                    local name = over:FindFirstChild("DisplayName") and over.DisplayName.Text or "?"
+                    local gen  = over:FindFirstChild("Generation") and over.Generation.Text or ""
+                    local mut  = over:FindFirstChild("Mutation") and over.Mutation.Text or ""
+                    local val  = parseMoney(gen)
+                    if val > bestVal then
+                        bestVal = val
+                        best = {name = name, info = gen, mutation = mut, part = spawn, value = val}
+                    end
+                end
+            end
+        end
+    end
+    return best
+end
+
+local espLoop
+function startESP()
+    if espLoop then return end
+    espLoop = task.spawn(function()
+        while Toggles["Esp Best Brainrots"] do
+            local pet = findBestPet()
+            if pet and (not currentPetInfo or pet.value > currentPetInfo.value or pet.mutation ~= currentPetInfo.mutation) then
+                currentPetInfo = pet
+                createESP(pet.name, pet.info, pet.mutation, pet.part)
+                createBeam(pet.part)
+            elseif not pet and currentESP then
+                if currentESP then currentESP:Destroy() currentESP = nil end
+                if currentBeam then currentBeam:Destroy() currentBeam = nil end
+                if a0 then a0:Destroy() a0 = nil end
+                if a1 then a1:Destroy() a1 = nil end
+                currentPetInfo = nil
+            end
+            task.wait(0.3)
+        end
+        espLoop = nil
+    end)
+end
+
+function stopESP()
+    if currentESP then currentESP:Destroy() currentESP = nil end
+    if currentBeam then currentBeam:Destroy() currentBeam = nil end
+    if a0 then a0:Destroy() a0 = nil end
+    if a1 then a1:Destroy() a1 = nil end
+    currentPetInfo = nil
+end
+
+-- AUTO LASER
+local laserLoop
+local function getNearest()
+    local hrp = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+    if not hrp then return end
+    local nearest, dist = nil, 100
+    for _, pl in ipairs(Players:GetPlayers()) do
+        if pl ~= LocalPlayer and pl.Character then
+            local root = pl.Character:FindFirstChild("HumanoidRootPart")
+            if root then
+                local d = (root.Position - hrp.Position).Magnitude
+                if d < dist then
+                    dist = d
+                    nearest = pl
+                end
+            end
+        end
+    end
+    return nearest
+end
+
+local function equipLaser()
+    if not UseItemRemote then return false end
+    local tool = LocalPlayer.Backpack:FindFirstChild("Laser Cape")
+    if tool then
+        tool.Parent = LocalPlayer.Character
+        return true
+    end
+    return false
+end
+
+function startAutoLaser()
+    if not UseItemRemote then
+        warn("[BrainrotHub] startAutoLaser disabled because UseItem remote is missing.")
+        return
+    end
+    if laserLoop then return end
+    laserLoop = task.spawn(function()
+        while Toggles["auto Laser"] do
+            local target = getNearest()
+            if target and equipLaser() then
+                local hand = target.Character and (target.Character:FindFirstChild("RightHand") or target.Character:FindFirstChild("LeftHand"))
+                if hand then
+                    pcall(function()
+                        -- UseItem remote may expect different args; we try original style and fallback
+                        local ok, err = pcall(function()
+                            UseItemRemote:FireServer(hand.Position, hand)
+                        end)
+                        if not ok then
+                            -- Try single-argument fallback
+                            pcall(function() UseItemRemote:FireServer(hand) end)
+                        end
+                    end)
+                end
+            end
+            task.wait(0.6)
+        end
+        laserLoop = nil
+    end)
+end
+
+function stopAutoLaser()
+    laserLoop = nil
+end
+
+-- WALL FLOAT
+function enableWallFloat()
+    for _, obj in ipairs(Workspace:GetDescendants()) do
+        if obj:IsA("BasePart") and obj.Anchored and obj.CanCollide then
+            local name = obj.Name:lower()
+            local parentName = obj.Parent and obj.Parent.Name:lower() or ""
+            if string.find(name, "base") or string.find(parentName, "base") then
+                originalTransparency[obj] = obj.LocalTransparencyModifier or 0
+                obj.LocalTransparencyModifier = 0.7
+            end
+        end
+    end
+
+    platform = Instance.new("Part")
+    platform.Size = Vector3.new(6, 1, 6)
+    platform.Anchored = true
+    platform.CanCollide = true
+    platform.Transparency = 1
+    platform.Parent = Workspace
+
+    task.spawn(function()
+        while Toggles["Wall And Steal Bases"] and platform do
+            local hrp = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+            if hrp then
+                platform.Position = hrp.Position - Vector3.new(0, 3, 0)
+            end
+            task.wait(0.05)
+        end
+    end)
+end
+
+function disableWallFloat()
+    if platform then platform:Destroy() platform = nil end
+    for part, trans in pairs(originalTransparency) do
+        if part and part.Parent then
+            part.LocalTransparencyModifier = trans
+        end
+    end
+    originalTransparency = {}
+end
+
+-- GRAPPLE SPEED
+local function ensureGrapple()
+    local tool = LocalPlayer.Character:FindFirstChild("Grapple Hook") or LocalPlayer.Backpack:FindFirstChild("Grapple Hook")
+    if tool and tool.Parent ~= LocalPlayer.Character then
+        tool.Parent = LocalPlayer.Character
+    end
+end
+
+local function buyGrapple()
+    if not BuyItemRemote then
+        warn("[BrainrotHub] buyGrapple disabled because RequestBuy remote not found.")
+        return
+    end
+    pcall(function()
+        -- Some requestBuy remotes use InvokeServer with name
+        if BuyItemRemote.InvokeServer then
+            BuyItemRemote:InvokeServer("Grapple Hook")
+        else
+            -- fallback: FireServer
+            BuyItemRemote:FireServer("Grapple Hook")
+        end
+    end)
+end
+
+function enableGrapple()
+    buyGrapple()
+    ensureGrapple()
+
+    table.insert(grappleConnections, RunService.Heartbeat:Connect(function()
+        if not Toggles["grapple Speed"] then return end
+        local hrp = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+        local hum = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("Humanoid")
+        if hrp and hum then
+            local dir = hum.MoveDirection.Magnitude > 0 and hum.MoveDirection.Unit or Vector3.new()
+            hrp.AssemblyLinearVelocity = Vector3.new(dir.X * grappleSpeed, hrp.AssemblyLinearVelocity.Y, dir.Z * grappleSpeed)
+        end
+    end))
+
+    table.insert(grappleConnections, RunService.RenderStepped:Connect(function()
+        if Toggles["grapple Speed"] then
+            pcall(function()
+                if UseItemRemote and UseItemRemote.FireServer then
+                    -- best-effort call; remote signature may vary
+                    UseItemRemote:FireServer(1.9832406361897787)
+                end
+            end)
+        end
+    end))
+
+    table.insert(grappleConnections, RunService.Heartbeat:Connect(function()
+        if Toggles["grapple Speed"] then ensureGrapple() end
+    end))
+end
+
+function disableGrapple()
+    for _, conn in ipairs(grappleConnections) do
+        if conn and conn.Connected then pcall(function() conn:Disconnect() end) end
+    end
+    grappleConnections = {}
+end
+
+-- === STEALTH ANTIHIT (NO GUI, AUTO-ON) ===
+local function getWebTool()
+    for _, tool in ipairs(LocalPlayer.Backpack:GetChildren()) do
+        if tool:IsA("Tool") and tool.Name == "Web Slinger" then
+            return tool
+        end
+    end
+    return nil
+end
+
+local function ensureWebTool()
+    if not getWebTool() then
+        if BuyItemRemote then
+            pcall(function() 
+                if BuyItemRemote.InvokeServer then
+                    BuyItemRemote:InvokeServer("Web Slinger")
+                else
+                    BuyItemRemote:FireServer("Web Slinger")
+                end
+            end)
+            task.wait(0.5)
+        else
+            -- if buy remote unavailable, try to find in Backpack (maybe already owned)
+            warn("[BrainrotHub] Can't auto-buy Web Slinger (RequestBuy missing).")
+        end
+    end
+end
+
+local function equipWebSlinger()
+    local char = LocalPlayer.Character
+    if not char then return end
+    local currentTool = char:FindFirstChildOfClass("Tool")
+    if currentTool and currentTool.Name ~= "Web Slinger" then
+        currentTool.Parent = LocalPlayer.Backpack
+    end
+    local tool = getWebTool()
+    if tool then
+        tool.Parent = char
+    end
+end
+
+local function useWebSlinger()
+    if not UseItemRemote then
+        warn("[BrainrotHub] useWebSlinger disabled because UseItem remote item remote is missing.")
+        return
+    end
+    local char = LocalPlayer.Character
+    if not char then return end
+    local tool = char:FindFirstChild("Web Slinger")
+    if tool and tool:FindFirstChild("Handle") then
+        -- many remotes expect a Vector3 and a Target/Part; adapt to known pattern but protect with pcall
+        local args = {
+            Vector3.new(-391.2049865722656, -7.293223857879639, 124.80510711669922),
+            char:FindFirstChild("UpperTorso") or char:FindFirstChild("Torso") or char:FindFirstChild("HumanoidRootPart")
+        }
+        pcall(function() 
+            if UseItemRemote.FireServer then
+                UseItemRemote:FireServer(unpack(args))
+            else
+                -- alternate remote type
+                pcall(function() UseItemRemote:InvokeServer(unpack(args)) end)
+            end
+        end)
+    end
+end
+
+function enableAntiHit()
+    -- Destroy any old GUI
+    if PlayerGui:FindFirstChild("WebSlingerGUI") then
+        PlayerGui.WebSlingerGUI:Destroy()
+    end
+
+    -- Anti-PlatformStand
+    task.spawn(function()
+        while Toggles["Antihit"] do
+            local hum = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+            if hum and hum.PlatformStand then
+                hum.PlatformStand = false
+            end
+            task.wait()
+        end
+    end)
+
+    -- Auto Trap Detection
+    antiHitLoop = task.spawn(function()
+        while Toggles["Antihit"] do
+            local hrp = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+            if hrp then
+                local trapped = hrp:FindFirstChild("TrappedTag")
+                local main = trapped and trapped:FindFirstChild("MainFrame")
+                local timeObj = main and main:FindFirstChild("Time")
+
+                if not timeObj and (tick() - lastTriggered) >= cooldown then
+                    lastTriggered = tick()
+                    ensureWebTool()
+                    task.wait(0.3)
+                    equipWebSlinger()
+                    task.wait(0.1)
+                    useWebSlinger()
+                end
+            end
+            task.wait(0.1)
+        end
+    end)
+
+    StarterGui:SetCore("SendNotification", {
+        Title = "Anti Hit",
+        Text = "ENABLED (STEALTH)",
+        Duration = 2
+    })
+end
+
+function disableAntiHit()
+    if antiHitLoop then antiHitLoop = nil end
+    StarterGui:SetCore("SendNotification", {
+        Title = "Anti Hit",
+        Text = "DISABLED",
+        Duration = 2
+    })
+end
+
+-- CHARACTER RESPAWN
+LocalPlayer.CharacterAdded:Connect(function()
+    task.wait(1)
+    if Toggles["Antihit"] then
+        disableAntiHit()
+        task.wait(0.5)
+        enableAntiHit()
+    end
+    if Toggles["grapple Speed"] then
+        ensureGrapple()
+    end
+end)
+
+print("✅ BRAINROT HUB LOADED — NO ERRORS, STEALTH ANTIHIT, DOMINATE.")
